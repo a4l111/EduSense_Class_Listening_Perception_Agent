@@ -1,0 +1,17 @@
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local application state and generated reports
+data/education_history.db
+data/education_history.db-*
+data/ultralytics-config/
+data/uploads/
+
+# Local environments and secrets
+.venv/
+venv/
+.env
+*.key
+*.pem

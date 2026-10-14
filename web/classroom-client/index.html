@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>线下课堂学生端</title>
+  <link rel="stylesheet" href="/client-assets/styles.css?v=7">
+</head>
+
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div>
+        <h1>学生端 · 线下课堂采集</h1>
+        <p>摄像头画面交给云边协同服务器分析，实时生成学习状态</p>
+      </div>
+      <div class="top-actions">
+        <a href="/" @click.prevent="goOnlineMode" class="page-link" title="切换到线上网课模式">线上网课模式</a>
+        <span v-if="seatLabel" class="seat-badge">{{ seatLabel }}</span>
+        <span class="status-pill" :class="{ on: running }">{{ running ? '采集中' : '已停止' }}</span>
+        <span class="status-pill" :class="{ on: reportActive }">{{ reportActive ? '上报中' : '未上报' }}</span>
+      </div>
+    </header>
+
+    <main class="main-area">
+      <!-- 左侧：摄像头预览 -->
+      <section class="camera-section">
+        <div class="video-frame">
+          <img v-if="currentImage" :src="currentImage" alt="分析画面" class="annotated-img">
+          <video ref="localVideo" v-show="source === 'browser_camera' && cameraReady"
+            class="local-preview" :class="{ 'has-analysis': currentImage }" autoplay muted playsinline></video>
+          <div v-if="!currentImage && !(source === 'browser_camera' && cameraReady)" class="placeholder">
+            <span class="placeholder-icon">🎥</span>
+            <p>{{ running ? '等待画面...' : '点击「开始采集」启动摄像头' }}</p>
+          </div>
+          <div class="overlay-info" v-if="running">
+            <span class="frame-counter">帧 #{{ frameIndex }}</span>
+            <span class="latency">{{ latencyText }}</span>
+          </div>
+        </div>
+
+        <div class="state-banner" :class="currentState">
+          <span class="state-icon">{{ stateIcon }}</span>
+          <span class="state-text">{{ stateLabel }}</span>
+          <span class="state-detail" v-if="behaviorLabel">{{ behaviorLabel }}</span>
+        </div>
+      </section>
+
+      <!-- 右侧：控制面板 -->
+      <aside class="control-panel">
+        <div class="panel-section">
+          <h3>采集源</h3>
+          <div class="source-tabs">
+            <button :class="{ active: source === 'browser_camera' }" @click="source = 'browser_camera'">📱 本机摄像头</button>
+            <button :class="{ active: source === 'camera' }" @click="source = 'camera'">🖥️ 服务器摄像头</button>
+            <button :class="{ active: source === 'sample' }" @click="source = 'sample'">🎬 样例视频</button>
+          </div>
+          <select v-if="source === 'browser_camera' && cameraDevices.length" v-model="selectedCameraId" class="select">
+            <option value="">默认前置摄像头</option>
+            <option v-for="camera in cameraDevices" :key="camera.id" :value="camera.id">{{ camera.label }}</option>
+          </select>
+          <select v-if="source === 'sample'" v-model="selectedVideo" class="select">
+            <option value="">选择样例视频...</option>
+            <option v-for="v in studentVideos" :key="v.path" :value="v.path">{{ v.label }}</option>
+          </select>
+          <p v-if="cameraError" class="camera-error">⚠️ {{ cameraError }}</p>
+          <p v-else-if="source === 'browser_camera'" class="source-help">首次启动时请允许浏览器访问摄像头；公网访问必须使用 HTTPS。</p>
+        </div>
+
+        <div class="panel-section">
+          <h3>分析模式</h3>
+          <div class="mode-tabs">
+            <button v-for="m in analysisModes" :key="m.value" :class="{ active: analysisMode === m.value }"
+              @click="analysisMode = m.value">{{ m.label }}</button>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <h3>身份信息</h3>
+          <input v-model="seatInput" placeholder="座位号" class="text-input" @blur="saveSeat">
+          <input v-model="nameInput" placeholder="学生姓名" class="text-input" @blur="saveSeat">
+          <p class="dashboard-url-display" v-if="dashboardUrl">
+            上报到: {{ dashboardUrl }}
+          </p>
+          <p class="dashboard-url-display warn" v-else>
+            ⚠️ 未设置管理端地址，数据不会上报
+          </p>
+        </div>
+
+        <div class="panel-section dao-info">
+          <h3>卸载状态</h3>
+          <div class="dao-row">
+            <span class="dao-label">策略</span>
+            <span class="dao-value" :class="daoStrategy">{{ daoStrategyText }}</span>
+          </div>
+          <div class="dao-row">
+            <span class="dao-label">边缘连接</span>
+            <span class="dao-value" :class="{ connected: edgeConnected }">{{ edgeConnected ? '已连接' : '未连接' }}</span>
+          </div>
+        </div>
+
+        <!-- 个人课堂学习报告（仅在教师下课、后台生成完成后展示） -->
+        <div class="panel-section report-panel">
+          <h3 class="report-panel-title">
+            个人课堂学习报告
+            <button class="report-refresh" type="button" :disabled="myReportLoading" @click="loadMyReport(true)">↻ 刷新</button>
+          </h3>
+          <div v-if="myReportLoading && !myReport" class="report-hint">正在拉取报告…</div>
+          <div v-else-if="myReportError" class="report-hint warn">{{ myReportError }}</div>
+          <template v-else-if="myReport">
+            <div class="focus-row">
+              <span class="focus-level" :class="levelClass(myReport.focus_level)">{{ myReport.focus_level || '—' }}</span>
+              <span class="focus-rate">专注率 {{ myReport.focus_rate }}%</span>
+              <span class="report-badge" v-if="myReport.final">最终报告</span>
+            </div>
+            <div class="report-summary-grid">
+              <div><small>有效课堂时长</small><strong>{{ formatDuration(myReport.duration_seconds || 0) }}</strong></div>
+              <div><small>需关注时长</small><strong>{{ formatDuration(myReport.risk_seconds || 0) }}</strong></div>
+              <div><small>报告生成方式</small><strong>{{ ovisItems.length ? '统计分析 + 智能评语' : '课堂统计分析' }}</strong></div>
+            </div>
+            <div class="state-bars">
+              <div v-for="row in reportStateRows" :key="row.key" class="state-bar-row">
+                <span class="bar-label">{{ row.label }}</span>
+                <div class="bar-track">
+                  <div class="bar-fill" :class="row.key" :style="{ width: row.percent + '%' }"></div>
+                </div>
+                <span class="bar-meta">{{ formatDuration(row.seconds) }} · {{ row.percent }}%</span>
+              </div>
+            </div>
+            <div class="report-block" v-if="reportStageRows.length">
+              <h4>课堂阶段变化</h4>
+              <div class="report-stage-grid">
+                <div v-for="row in reportStageRows" :key="row.stage" class="report-stage-card">
+                  <strong>{{ row.stage }}</strong>
+                  <span>专注 {{ row.focus }}%</span>
+                  <small>分心 {{ row.distracted }}% · 疲劳 {{ row.tired }}%</small>
+                </div>
+              </div>
+            </div>
+            <div class="report-block" v-if="myReport.evidence && myReport.evidence.length">
+              <h4>课堂表现依据</h4>
+              <ul><li v-for="(item, idx) in myReport.evidence" :key="idx">{{ item }}</li></ul>
+            </div>
+            <div class="report-block suggestion-block" v-if="myReport.suggestions && myReport.suggestions.length">
+              <h4>改进建议</h4>
+              <ul><li v-for="(item, idx) in myReport.suggestions" :key="idx">{{ item }}</li></ul>
+            </div>
+            <div class="ovis-comment" v-if="ovisItems.length > 0">
+              <h4>🤖 Ovis 智能评语</h4>
+              <div v-for="(item, idx) in ovisItems" :key="idx" class="ovis-item">
+                <span class="ovis-label">{{ item.label }}</span>
+                <span class="ovis-text">{{ item.text }}</span>
+              </div>
+            </div>
+            <div class="report-hint" v-else-if="myReport.ovis_status === 'generating'">完整统计报告已生成，Ovis 个性化评语正在后台补充，完成后会自动显示。</div>
+            <div class="report-hint warn" v-else-if="myReport.ovis_status === 'failed'">Ovis 评语本次生成失败，当前统计报告不受影响。</div>
+            <div class="report-hint" v-else>当前展示完整的课堂统计报告；Ovis 可在此基础上补充更自然的个性化评语。</div>
+            <p class="report-limit" v-if="myReport.limitations">{{ myReport.limitations }}</p>
+            <p class="privacy-note">🔒 隐私保护：报告仅基于脱敏状态统计数字生成；Ovis 多模态接口只接收 16×16 空白图，不上传课堂视频或人脸画面。</p>
+          </template>
+          <div v-else class="report-hint">上课期间只进行实时学习状态分析；教师下课后，系统会一次性生成并自动展示本次课堂报告。</div>
+        </div>
+
+        <button class="btn-start" :class="{ running }" @click="toggleAnalysis">
+          {{ running ? '⏹ 停止采集' : '▶ 开始采集' }}
+        </button>
+      </aside>
+    </main>
+
+  </div>
+
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="/client-assets/app.js?v=9"></script>
+</body>
+
+</html>

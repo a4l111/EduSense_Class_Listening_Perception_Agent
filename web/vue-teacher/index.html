@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI 虚拟教师 · 高等数学课堂</title>
+  <link rel="stylesheet" href="/assets/styles.css?v=17" />
+</head>
+<body>
+  <div id="app" :class="shellClasses">
+    <header class="topbar">
+      <div>
+        <h1>学生端 · 线上网课课堂</h1>
+        <p class="eyebrow">云边协同 · AI 虚拟教师在线授课</p>
+      </div>
+      <div class="top-actions">
+        <a href="/client" @click.prevent="goClassroomMode" class="mode-link" title="切换到线下课堂采集端">线下课堂模式</a>
+        <div class="live-pill" :class="{ active: running }">
+          <span></span>
+          {{ running ? '课堂分析中' : '课堂待机' }}
+        </div>
+        <button class="primary-button" @click="toggleAnalysis">
+          {{ primaryButtonText }}
+        </button>
+      </div>
+    </header>
+
+    <main class="dashboard-grid">
+      <section class="panel course-panel panel-course">
+        <div class="section-title color-title course-title">
+          <span><span class="title-icon">🎬</span>课程播放</span>
+          <small>{{ selectedLesson.teacher }}</small>
+        </div>
+
+        <label class="field-label" for="lesson">课程章节</label>
+        <select id="lesson" v-model="selectedLessonId" class="select">
+          <option v-for="lesson in lessons" :key="lesson.id" :value="lesson.id">
+            {{ lesson.title }}
+          </option>
+        </select>
+
+        <div class="video-frame">
+          <div class="video-overlay">
+            <span>{{ action.action || '等待学生状态' }}</span>
+            <strong>{{ coursePlaybackRateText }}</strong>
+          </div>
+          <video
+            v-if="selectedLesson.video_exists"
+            ref="courseVideo"
+            :src="selectedLesson.video_url"
+            controls
+            playsinline
+            @loadedmetadata="handleCourseLoadedMetadata"
+            @play="handleCoursePlay"
+            @pause="handleCoursePause"
+          ></video>
+          <div v-else class="empty-video">
+            <strong>未找到教学视频</strong>
+            <span>{{ selectedLesson.local_video }}</span>
+          </div>
+        </div>
+
+        <div class="lesson-meta">
+          <div>
+            <span>学科</span>
+            <strong>{{ selectedLesson.subject }}</strong>
+          </div>
+          <div>
+            <span>难度</span>
+            <strong>{{ selectedLesson.difficulty }}</strong>
+          </div>
+          <div>
+            <span>节奏</span>
+            <strong>{{ action.pace || selectedLesson.pace }} · 实际 {{ coursePlaybackRateText }}</strong>
+          </div>
+          <div>
+            <span>状态</span>
+            <strong>{{ actionStatusText }}</strong>
+          </div>
+        </div>
+
+      </section>
+
+      <section class="panel monitor-panel panel-monitor">
+        <div class="section-title color-title monitor-title">
+          <span><span class="title-icon">📷</span>边缘采样监控</span>
+          <small>采样运行在边缘设备端 · {{ connectionText }}</small>
+        </div>
+
+        <div class="control-row">
+          <div class="control-group">
+            <span class="control-label">采样来源</span>
+            <div class="segmented">
+              <button :class="{ active: source === 'sample' }" @click="source = 'sample'">样例视频</button>
+              <button :class="{ active: source === 'camera' }" @click="source = 'camera'">摄像头</button>
+            </div>
+          </div>
+          <div class="control-group mode-control">
+            <span class="control-label">分析模式</span>
+            <div class="segmented analysis-mode-tabs">
+              <button
+                v-for="mode in analysisModes"
+                :key="mode.key"
+                :class="{ active: analysisMode === mode.key }"
+                :title="mode.note"
+                @click="setAnalysisMode(mode.key)"
+              >
+                {{ mode.label }}
+              </button>
+            </div>
+            <small>{{ analysisModeText }}</small>
+          </div>
+          <div class="control-group video-control" v-if="source === 'sample'">
+            <span class="control-label">学生视频</span>
+            <select v-model="selectedStudentVideo" class="select compact">
+              <option value="">自动选择样例</option>
+              <option v-for="video in studentVideos" :key="video.relative_path" :value="video.relative_path">
+                {{ video.name }}
+              </option>
+            </select>
+          </div>
+        </div>
+
+        <div class="camera-frame">
+          <div class="sample-status">{{ sampleText }}</div>
+          <div class="mode-status">{{ poseStatusText }}</div>
+          <img v-if="analysisImage" :key="sampleInfo.frame_index" :src="analysisImage" alt="学生分析画面" />
+          <div v-else class="empty-camera">
+            <strong>等待边缘采样</strong>
+            <span>这里仅用于监控树莓派/摄像头采样，不作为网课主画面。</span>
+          </div>
+        </div>
+
+        <div class="metric-grid">
+          <div class="metric state-metric" v-for="item in stateItems" :key="item.key" :class="item.key">
+            <span>{{ item.label }}</span>
+            <strong>{{ item.value }}</strong>
+          </div>
+          <div class="metric latency">
+            <span>延迟</span>
+            <strong>{{ latencyText }}</strong>
+          </div>
+        </div>
+
+        <div class="dao-panel">
+          <div>
+            <span>DAO策略</span>
+            <strong>{{ daoDecision.policy || '等待决策' }}</strong>
+          </div>
+          <div>
+            <span>卸载判断</span>
+            <strong>{{ daoDecision.strategy || edge.strategy || 'unknown' }}</strong>
+          </div>
+          <div>
+            <span>准入状态</span>
+            <strong>{{ daoAdmissionText }}</strong>
+          </div>
+          <div>
+            <span>DAG优先级</span>
+            <strong>{{ daoPriorityText }}</strong>
+          </div>
+          <div>
+            <span>卸载阶段</span>
+            <strong>{{ daoStageCount }}</strong>
+          </div>
+          <div>
+            <span>拥塞窗口</span>
+            <strong>{{ daoWindowText }}</strong>
+          </div>
+          <div>
+            <span>目标节点</span>
+            <strong>{{ daoTargetText }}</strong>
+          </div>
+          <div>
+            <span>传输估计</span>
+            <strong>{{ daoTransferText }}</strong>
+          </div>
+          <div>
+            <span>节点评分</span>
+            <strong>{{ daoNeighborScoreText }}</strong>
+          </div>
+          <p>{{ daoDecision.reason || '启动分析后显示 DAO 准入控制结果。' }}</p>
+          <p class="dao-note">{{ daoDecision.execution_note || 'DAO 决策负责是否卸载；具体阶段执行由当前边缘推理服务能力决定。' }}</p>
+        </div>
+      </section>
+
+      <aside class="panel teacher-panel panel-teacher">
+        <div class="section-title color-title teacher-title">
+          <span><span class="title-icon">🧑‍🏫</span>AI 虚拟教师</span>
+          <small>{{ edgeText }}</small>
+        </div>
+
+        <div class="teacher-card" :class="[actionLevel, teacherMood.className]">
+          <div class="teacher-avatar" :class="teacherMood.className" :title="teacherMood.label">
+            <div class="lumi-core">
+              <span class="lumi-ear left"></span>
+              <span class="lumi-ear right"></span>
+              <span class="lumi-eye left"></span>
+              <span class="lumi-eye right"></span>
+              <span class="lumi-mouth"></span>
+            </div>
+            <div class="mood-label">{{ teacherMood.label }}</div>
+          </div>
+          <div>
+            <p class="teacher-label">当前教学动作</p>
+            <h2>{{ action.action || '等待学生状态' }}</h2>
+            <p>{{ action.reason || '启动分析后，系统会根据学生状态生成教学干预。' }}</p>
+            <div class="source-badge" :class="{ llm: action.llm_used }">
+              {{ action.feedback_source || '规则引擎' }}
+            </div>
+          </div>
+        </div>
+
+        <div class="script-box">
+          <span>💬 教师反馈话术</span>
+          <p>{{ action.script || '准备开始本节课。' }}</p>
+        </div>
+
+        <div class="next-step">
+          <span>📝 下一步安排 · {{ playbackTime }}</span>
+          <p>{{ action.next_step || selectedLesson.quiz }}</p>
+        </div>
+
+        <!-- AI 聊天助手 -->
+        <!-- AI 聊天助手 -->
+        <div class="ai-chat-section">
+          <div class="chat-header">
+            <span>🤖 AI 聊天助手</span>
+          </div>
+          <div class="chat-messages" ref="chatMessages">
+            <div v-for="(msg, idx) in chatMessages" :key="idx" class="chat-message" :class="msg.role">
+              <div class="chat-message-avatar">{{ msg.role === 'user' ? '你' : 'AI' }}</div>
+              <div class="chat-message-content">{{ msg.content }}</div>
+            </div>
+            <div v-if="chatLoading" class="chat-message assistant thinking-message">
+              <div class="chat-message-avatar thinking-avatar">
+                <span class="thinking-face">
+                  <span class="eye left"></span>
+                  <span class="eye right"></span>
+                </span>
+              </div>
+              <div class="chat-message-content thinking-content">
+                <span>AI 正在思考</span>
+                <span class="thinking-dots"><i></i><i></i><i></i></span>
+              </div>
+            </div>
+            <div v-if="chatMessages.length === 0" class="chat-empty">
+              <span>输入问题开始与 AI 助手对话 🎓</span>
+            </div>
+          </div>
+          <div class="chat-input-row">
+            <input type="text" v-model="chatInput" class="chat-input chat-input-main" placeholder="输入消息..." @keydown.enter="sendChatMessage" :disabled="chatLoading" />
+            <button class="chat-send-btn" @click="sendChatMessage" :disabled="chatLoading || !chatInput.trim()">
+              {{ chatLoading ? '...' : '发送' }}
+            </button>
+          </div>
+          <div class="chat-footer" v-if="chatLastUsage">
+            <span>Token 消耗：{{ chatLastUsage.total_tokens }}（提示 {{ chatLastUsage.prompt_tokens }} + 补全 {{ chatLastUsage.completion_tokens }}）</span>
+          </div>
+          <div class="chat-footer" v-if="chatMessages.length > 0">
+            <button class="chat-clear-btn" @click="clearChat">清空对话</button>
+          </div>
+        </div>
+
+      </aside>
+    </main>
+
+    <footer class="statusbar">
+      <span>课程视频：{{ selectedLesson.local_video }}</span>
+      <span>WebSocket：{{ connectionText }}</span>
+      <span>策略：{{ edge.strategy || 'unknown' }}</span>
+    </footer>
+  </div>
+
+  <script src="/assets/vendor/vue.global.prod.js"></script>
+  <script>
+    window.addEventListener("error", (event) => {
+      const app = document.getElementById("app");
+      if (!app || window.Vue) return;
+      app.innerHTML = '<div class="load-error"><strong>前端运行时加载失败</strong><span>请确认 /assets/vendor/vue.global.prod.js 可以访问，然后刷新页面。</span></div>';
+    });
+  </script>
+  <script src="/assets/app.js?v=36"></script>
+</body>
+</html>

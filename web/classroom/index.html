@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>线下课堂教师管理端</title>
+  <link rel="stylesheet" href="/classroom-assets/styles.css?v=5" />
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+</head>
+<body>
+  <div id="app" :class="{ loading }">
+    <!-- ====== 顶栏 ====== -->
+    <header class="topbar">
+      <div>
+        <h1>教师端 · 线下课堂总览</h1>
+        <p>学生在线状态、学习情况与课堂告警实时汇总</p>
+      </div>
+      <div class="top-actions">
+        <a class="page-link home-link" href="/admin">DAO 调度管理</a>
+        <span class="status">总学生 {{ totalStudents }}</span>
+        <span class="status">在线 {{ onlineCount }}</span>
+        <span class="status" :class="{ warn: attentionCount > 0 }">需关注 {{ attentionCount }}</span>
+        <button class="page-link" type="button" @click="loadAll">刷新数据</button>
+        <button v-if="!teacherSession.active" class="page-link session-start" type="button" @click="startSession">▶ 开始上课</button>
+        <button v-else class="page-link session-finish" type="button" :disabled="teacherSession.generating" @click="finishSession">{{ teacherSession.generating ? '⏳ 正在生成报告…' : '■ 下课·生成报告' }}</button>
+        <button class="page-link" type="button" @click="clearAll">清空课堂</button>
+      </div>
+    </header>
+
+    <!-- ====== 状态分布条（未开始上课时隐藏） ====== -->
+    <section class="distribution-bar" v-if="teacherSession.active">
+      <div
+        v-for="state in stateBarItems"
+        :key="state.key"
+        class="dist-segment"
+        :class="state.key"
+        :style="{ flex: String(Math.max(state.count, 0.5)) }"
+        :title="state.label + ': ' + state.count"
+      >
+        <span v-if="state.count > 0">{{ state.label }} {{ state.count }}</span>
+      </div>
+    </section>
+
+    <!-- ====== 过滤按钮（未开始上课时隐藏） ====== -->
+    <section class="filter-bar" v-if="teacherSession.active">
+      <button
+        v-for="opt in filterOptions"
+        :key="opt.value"
+        :class="['filter-btn', { active: filter === opt.value }]"
+        @click="filter = opt.value"
+      >
+        {{ opt.label }}
+        <span class="filter-count">{{ opt.count }}</span>
+      </button>
+    </section>
+
+    <!-- ====== 主区域（未开始上课时隐藏学生卡片） ====== -->
+    <main class="main-area" v-if="teacherSession.active">
+      <!-- 学生网格 -->
+      <section class="student-grid" v-if="filteredStudents.length > 0">
+        <div
+          v-for="stu in filteredStudents"
+          :key="stu.device_id"
+          class="student-card"
+          :class="[stu.display_state, { offline: !stu.online }]"
+        >
+          <div class="card-header">
+            <span class="seat-tag">{{ stu.seat_label || '未命名' }}</span>
+            <span class="student-name">{{ stu.student_name || '未知' }}</span>
+          </div>
+
+          <div class="card-thumbnail">
+            <img v-if="stu.frame_thumbnail" :src="stu.frame_thumbnail" alt="frame" />
+            <div v-else class="no-frame">
+              <span>{{ stu.online ? '等待画面...' : '离线' }}</span>
+            </div>
+            <div class="state-badge" :class="stu.display_state">
+              {{ stu.display_label }}
+            </div>
+            <div v-if="!stu.online" class="offline-overlay">
+              <span>离线 {{ formatSeconds(stu.seconds_since_report) }}</span>
+            </div>
+          </div>
+
+          <div class="card-footer">
+            <div class="footer-row">
+              <span class="footer-item">
+                <span class="dot" :class="stu.edge_connected ? 'green' : 'red'"></span>
+                {{ stu.edge_connected ? '边缘已连接' : '边缘未连接' }}
+              </span>
+              <span class="footer-item">{{ stu.latency_ms }}ms</span>
+            </div>
+            <div class="footer-row">
+              <span class="footer-item dao" :class="stu.dao_strategy">
+                DAO: {{ daoLabel(stu.dao_strategy) }}
+              </span>
+              <span class="footer-item">{{ formatSeconds(stu.seconds_since_report) }}前</span>
+            </div>
+            <div v-if="stu.needs_attention && stu.needs_attention.length > 0" class="reasons">
+              <span v-for="(item, i) in stu.needs_attention.slice(0, 2)" :key="i" class="reason-tag">
+                {{ item.state_label || item.state }}
+              </span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 空状态 -->
+      <section class="empty-state" v-else>
+        <div class="empty-icon">📡</div>
+        <h2>等待学生设备上线...</h2>
+        <p>请确保各树莓派已启动并配置了 <code>CLASSROOM_DASHBOARD_URL</code></p>
+        <p class="hint">上报地址: <code>POST {{ currentHost }}/api/student/report</code></p>
+      </section>
+
+      <!-- 告警侧栏 -->
+      <aside class="alert-panel" v-if="alerts.length > 0">
+        <h3 class="alert-title">⚠️ 实时告警</h3>
+        <div class="alert-list">
+          <div
+            v-for="(alert, i) in alerts.slice(0, 20)"
+            :key="i"
+            class="alert-item"
+            :class="alert.state"
+          >
+            <div class="alert-left">
+              <span class="alert-name">{{ alert.student_name }}</span>
+              <span class="alert-state" :class="alert.state">{{ alert.state_label }}</span>
+            </div>
+            <span class="alert-time">{{ formatSeconds(alert.seconds_ago) }}前</span>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- ====== 未开始上课：等待占位（服务端持续分析、学生端展示不受影响） ====== -->
+    <section class="waiting-state" v-else>
+      <div class="waiting-icon">🕐</div>
+      <h2>等待教师点击「开始上课」</h2>
+      <p>上课期间在此展示学生卡片与实时告警；后台分析与学生端学习状态展示不受影响。</p>
+    </section>
+
+    <!-- ====== 报告生成中 / 生成失败 ====== -->
+    <section class="teacher-report-panel generating" v-if="teacherSession.generating">
+      <h3 class="report-title">⏳ 正在生成报告…</h3>
+      <p class="report-summary">正在按本次课堂时间窗聚合历史事件流，生成全班与个人分析报告（含 Ovis 智能评语），完成后自动展示。</p>
+    </section>
+    <section class="teacher-report-panel error" v-else-if="teacherSession.error">
+      <h3 class="report-title">⚠️ 报告生成失败</h3>
+      <p class="report-summary">{{ teacherSession.error }}</p>
+    </section>
+
+    <!-- ====== 课堂总结报告（点击「下课·生成报告」后展示） ====== -->
+    <section class="teacher-report-panel" v-else-if="teacherReport">
+      <h3 class="report-title">📋 课堂总结报告</h3>
+      <div class="report-metrics">
+        <div class="report-metric">
+          <span class="metric-value">{{ teacherReport.student_count }}</span>
+          <span class="metric-label">学生数</span>
+        </div>
+        <div class="report-metric">
+          <span class="metric-value">{{ teacherReport.focus_rate }}%</span>
+          <span class="metric-label">整体专注度</span>
+        </div>
+        <div class="report-metric">
+          <span class="metric-value">{{ formatSeconds(teacherReport.duration_seconds) }}</span>
+          <span class="metric-label">课堂时长</span>
+        </div>
+        <div class="report-metric">
+          <span class="metric-value">{{ teacherReport.attention_student_count }}</span>
+          <span class="metric-label">需关注人数</span>
+        </div>
+        <div class="report-metric">
+          <span class="metric-value">{{ teacherReport.alert_count }}</span>
+          <span class="metric-label">告警次数</span>
+        </div>
+      </div>
+
+      <div class="report-stage-trend">
+        <div v-for="t in teacherReport.stage_trend" :key="t.stage" class="stage-item">
+          <span class="stage-name">{{ t.stage }}</span>
+          <span class="stage-focus">专注 {{ t.focus_rate }}%</span>
+          <span class="stage-dist">分心 {{ t.distracted_rate }}%</span>
+        </div>
+      </div>
+
+      <div class="report-priority" v-if="teacherReport.priority_students && teacherReport.priority_students.length > 0">
+        <h4>优先关注学生</h4>
+        <div class="priority-list">
+          <span v-for="p in teacherReport.priority_students" :key="p.device_id" class="priority-tag">
+            {{ p.student_name }} · 专注 {{ p.focus_rate }}%
+          </span>
+        </div>
+      </div>
+
+      <div class="report-ranking" v-if="teacherReport.focus_ranking && teacherReport.focus_ranking.length > 0">
+        <h4>专注率排名 · 点击学生查看个人报告</h4>
+        <div class="ranking-list">
+          <div v-for="(s, idx) in teacherReport.focus_ranking" :key="s.device_id" class="ranking-item">
+            <button type="button" class="ranking-head" @click="toggleStudentReport(s.device_id)">
+              <span class="ranking-no" :class="{ top3: idx < 3 }">{{ idx + 1 }}</span>
+              <span class="ranking-name">{{ s.student_name }}</span>
+              <span class="ranking-seat" v-if="s.seat_label">{{ s.seat_label }}</span>
+              <span class="level-badge" :class="levelClass(s.focus_level)">{{ s.focus_level }}</span>
+              <span class="ranking-rate">专注 {{ s.focus_rate }}%</span>
+            </button>
+            <div v-if="expandedStudent === s.device_id" class="personal-report">
+              <button type="button" class="personal-close" @click="expandedStudent = null">收起 ✕</button>
+              <div v-if="personalLoading" class="personal-loading">正在加载个人报告…</div>
+              <div v-else-if="personalReport && personalReport.error" class="personal-loading">{{ personalReport.error }}</div>
+              <template v-else-if="personalReport">
+                <p class="personal-meta">
+                  {{ personalReport.student_name }}<template v-if="personalReport.seat_label"> · {{ personalReport.seat_label }}</template>
+                  · 有效时长 {{ formatSeconds(personalReport.duration_seconds) }}
+                  · 专注率 {{ personalReport.focus_rate }}%
+                </p>
+                <div class="personal-level-row">
+                  <span class="level-badge large" :class="levelClass(personalReport.focus_level)">{{ personalReport.focus_level }}</span>
+                  <span class="personal-risk">风险时长 {{ formatSeconds(personalReport.risk_seconds || 0) }}</span>
+                </div>
+                <div class="personal-durations">
+                  <div v-for="row in personalStateRows" :key="row.key" class="duration-row">
+                    <span class="duration-label">{{ row.label }}</span>
+                    <div class="duration-track">
+                      <div class="duration-fill" :class="row.key" :style="{ width: row.percent + '%' }"></div>
+                    </div>
+                    <span class="duration-meta">{{ formatSeconds(row.seconds) }} · {{ row.percent }}%</span>
+                  </div>
+                </div>
+                <div class="personal-stage">
+                  <div v-for="t in personalReport.stage_trend" :key="t.stage" class="stage-item">
+                    <span class="stage-name">{{ t.stage }}</span>
+                    <span class="stage-focus">专注 {{ t.focus_rate }}%</span>
+                    <span class="stage-dist">分心 {{ t.distracted_rate }}%</span>
+                  </div>
+                </div>
+                <div class="personal-evidence" v-if="personalReport.evidence && personalReport.evidence.length > 0">
+                  <h5>行为证据摘要</h5>
+                  <ul>
+                    <li v-for="(e, i) in personalReport.evidence" :key="i">{{ e }}</li>
+                  </ul>
+                </div>
+                <div class="personal-ovis" v-if="personalOvisItems.length > 0">
+                  <h5>🤖 Ovis 智能评语</h5>
+                  <div v-for="(item, i) in personalOvisItems" :key="i" class="ovis-item">
+                    <span class="ovis-label">{{ item.label }}</span>
+                    <span class="ovis-text">{{ item.text }}</span>
+                  </div>
+                </div>
+                <div class="personal-suggestions" v-if="personalReport.suggestions && personalReport.suggestions.length > 0">
+                  <h5>学习建议</h5>
+                  <ul>
+                    <li v-for="(s2, i) in personalReport.suggestions" :key="i">{{ s2 }}</li>
+                  </ul>
+                </div>
+              </template>
+              <div v-else class="personal-loading">暂无个人报告数据</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="report-actions">
+        <h4>教学建议</h4>
+        <ul>
+          <li v-for="(a, i) in teacherReport.teacher_actions" :key="i">{{ a }}</li>
+        </ul>
+      </div>
+
+      <div class="report-ovis" v-if="classOvisItems.length > 0">
+        <h4>🤖 Ovis 全班智能评语</h4>
+        <div v-for="(item, i) in classOvisItems" :key="i" class="ovis-item">
+          <span class="ovis-label">{{ item.label }}</span>
+          <span class="ovis-text">{{ item.text }}</span>
+        </div>
+      </div>
+      <p class="report-ovis-note" v-if="teacherReport.ovis_status === 'generating'">
+        完整统计报告已生成，Ovis 全班与个人智能评语正在后台补充。
+      </p>
+      <p class="report-ovis-note" v-else-if="teacherReport.ovis_status === 'skipped'">
+        Ovis 评语未启用：{{ teacherReport.ovis_skip_reason }}
+      </p>
+      <p class="report-ovis-note" v-else-if="teacherReport.ovis_status === 'failed'">
+        Ovis 评语生成失败：{{ teacherReport.ovis_error }}
+      </p>
+
+      <p class="report-summary">{{ teacherReport.summary }}</p>
+      <p class="report-limitations">{{ teacherReport.limitations }}</p>
+    </section>
+
+    <!-- ====== 加载遮罩 ====== -->
+    <div class="loading-overlay" v-if="loading">
+      <div class="spinner"></div>
+    </div>
+  </div>
+
+  <script src="/classroom-assets/app.js?v=6"></script>
+</body>
+</html>
